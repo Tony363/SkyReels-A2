@@ -25,7 +25,7 @@ seed = 42
 # model parameters 
 device = "cuda"
 video_path = "output.mp4"
-pipeline_path = "/path/to/model"
+pipeline_path = "/teamspace/studios/this_studio/SkyReels-A2/local_path"
 dtype = torch.bfloat16
 
 # load models 
