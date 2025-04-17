@@ -23,14 +23,14 @@ height = 480
 seed = 42 
 
 # model parameters 
-device = "cuda"
+device = "cpu"
 video_path = "output.mp4"
 pipeline_path = "/teamspace/studios/this_studio/SkyReels-A2/local_path"
-dtype = torch.bfloat16
+dtype = torch.float16
 
 # load models 
-image_encoder = CLIPVisionModel.from_pretrained(pipeline_path, subfolder="image_encoder", torch_dtype=torch.float32) 
-vae = AutoencoderKLWan.from_pretrained(pipeline_path, subfolder="vae", torch_dtype=torch.float32)
+image_encoder = CLIPVisionModel.from_pretrained(pipeline_path, subfolder="image_encoder", torch_dtype=torch.float16) 
+vae = AutoencoderKLWan.from_pretrained(pipeline_path, subfolder="vae", torch_dtype=torch.float16)
 
 print("load transformer...")
 model_path = os.path.join(pipeline_path, 'transformer')
@@ -39,7 +39,14 @@ transformer = A2Model.from_pretrained(model_path, torch_dtype=dtype, use_safeten
 
 transformer.to(device, dtype=dtype) 
 
-pipe = A2Pipeline.from_pretrained(pipeline_path, transformer=transformer, vae=vae, image_encoder=image_encoder, torch_dtype=dtype)
+pipe = A2Pipeline.from_pretrained(
+    pipeline_path, 
+    transformer=transformer, 
+    vae=vae, 
+    image_encoder=image_encoder, 
+    torch_dtype=dtype
+)
+# pipe.enable_sequential_cpu_offload() # TONY ADDED
 
 scheduler = UniPCMultistepScheduler(prediction_type='flow_prediction', use_flow_sigmas=True, num_train_timesteps=1000, flow_shift=8)
 pipe.scheduler = scheduler 
@@ -65,7 +72,7 @@ for image_id, image_path in enumerate(refer_images):
         image_vae = _crop_and_resize(image, height=height, width=width) # background image
     
     image_vae = video_processor.preprocess(image_vae, height=height, width=width).to(memory_format=torch.contiguous_format) # (1, 3, 480, 320)
-    image_vae = image_vae.unsqueeze(2).to(device, dtype=torch.float32)
+    image_vae = image_vae.unsqueeze(2).to(device, dtype=torch.float16)
     vae_image_list.append(image_vae) #.to(device, dtype=dtype))
 
 # forward

@@ -4,84 +4,51 @@ from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 import ftfy
 import regex as re
 import torch
-from transformers import AutoTokenizer, UMT5EncoderModel
-
+from transformers import AutoTokenizer, UMT5EncoderModel, CLIPImageProcessor, CLIPVisionModel
+from diffusers import DiffusionPipeline
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
-from diffusers.loaders import WanLoraLoaderMixin 
+from diffusers.loaders import WanLoraLoaderMixin
 from diffusers.image_processor import PipelineImageInput
 from diffusers.models import AutoencoderKLWan, WanTransformer3DModel
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-from diffusers.utils import is_torch_xla_available, logging, replace_example_docstring
+from diffusers.utils import is_torch_xla_available
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.video_processor import VideoProcessor
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
-from transformers import AutoTokenizer, CLIPImageProcessor, CLIPVisionModel, UMT5EncoderModel
-
-import PIL
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
-
     XLA_AVAILABLE = True
 else:
     XLA_AVAILABLE = False
 
-def basic_clean(text):
+def basic_clean(text: str) -> str:
     text = ftfy.fix_text(text)
     text = html.unescape(html.unescape(text))
     return text.strip()
 
+def whitespace_clean(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
-def whitespace_clean(text):
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip()
-    return text
-
-
-def prompt_clean(text):
-    text = whitespace_clean(basic_clean(text))
-    return text
-
+def prompt_clean(text: str) -> str:
+    return whitespace_clean(basic_clean(text))
 
 def retrieve_latents(
-    encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
-):
+    encoder_output: torch.Tensor,
+    generator: Optional[torch.Generator] = None,
+    sample_mode: str = "sample"
+) -> torch.Tensor:
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
-    elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
+    if hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
         return encoder_output.latent_dist.mode()
-    elif hasattr(encoder_output, "latents"):
+    if hasattr(encoder_output, "latents"):
         return encoder_output.latents
-    else:
-        raise AttributeError("Could not access latents of provided encoder_output")
-
+    raise AttributeError("Could not access latents of provided encoder_output")
 
 class A2Pipeline(DiffusionPipeline, WanLoraLoaderMixin):
-    r"""
-    Pipeline for image-to-video generation using Wan.
-
-    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods
-    implemented for all pipelines (downloading, saving, running on a particular device, etc.).
-
-    Args:
-        tokenizer ([`T5Tokenizer`]):
-            Tokenizer from [T5](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5Tokenizer),
-            specifically the [google/umt5-xxl](https://huggingface.co/google/umt5-xxl) variant.
-        text_encoder ([`T5EncoderModel`]):
-            [T5](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5EncoderModel), specifically
-            the [google/umt5-xxl](https://huggingface.co/google/umt5-xxl) variant.
-        image_encoder ([`CLIPVisionModel`]):
-            [CLIP](https://huggingface.co/docs/transformers/model_doc/clip#transformers.CLIPVisionModel), specifically
-            the
-            [clip-vit-huge-patch14](https://github.com/mlfoundations/open_clip/blob/main/docs/PRETRAINED.md#vit-h14-xlm-roberta-large)
-            variant.
-        transformer ([`WanTransformer3DModel`]):
-            Conditional Transformer to denoise the input latents.
-        scheduler ([`UniPCMultistepScheduler`]):
-            A scheduler to be used in combination with `transformer` to denoise the encoded image latents.
-        vae ([`AutoencoderKLWan`]):
-            Variational Auto-Encoder (VAE) Model to encode and decode videos to and from latent representations.
+    """
+    Image-to-video generation pipeline optimized for low VRAM.
     """
 
     model_cpu_offload_seq = "text_encoder->image_encoder->transformer->vae"
@@ -99,6 +66,7 @@ class A2Pipeline(DiffusionPipeline, WanLoraLoaderMixin):
     ):
         super().__init__()
 
+        # Register modules
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -109,10 +77,46 @@ class A2Pipeline(DiffusionPipeline, WanLoraLoaderMixin):
             image_processor=image_processor,
         )
 
-        self.vae_scale_factor_temporal = 2 ** sum(self.vae.temperal_downsample) if getattr(self, "vae", None) else 4
-        self.vae_scale_factor_spatial = 2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
+        # ─ Memory Optimizations ─────────────────────────────────────────
+        # 1️⃣ Full-model CPU offload
+        self.enable_model_cpu_offload()  # :contentReference[oaicite:9]{index=9}
+
+        # 2️⃣ Memory-efficient attention & slicing
+        self.enable_xformers_memory_efficient_attention()  # :contentReference[oaicite:10]{index=10}
+        self.enable_attention_slicing()                   # :contentReference[oaicite:11]{index=11}
+
+        # 3️⃣ Gradient checkpointing on supported modules
+        # Transformer & encoders support checkpointing; VAE may not
+        if hasattr(self.transformer, "enable_gradient_checkpointing"):
+            self.transformer.enable_gradient_checkpointing()
+        if hasattr(self.text_encoder, "gradient_checkpointing_enable"):
+            self.text_encoder.gradient_checkpointing_enable()
+        if hasattr(self.image_encoder, "gradient_checkpointing_enable"):
+            self.image_encoder.gradient_checkpointing_enable()
+        # VAE: skip if unsupported to avoid ValueError :contentReference[oaicite:12]{index=12}
+
+        # ─ VAE Slicing & Tiling (conditionally enabled) ─────────────────────────
+        if hasattr(self, "enable_vae_slicing"):
+            self.enable_vae_slicing()  # :contentReference[oaicite:13]{index=13}
+        if hasattr(self, "enable_vae_tiling"):
+            self.enable_vae_tiling()   # :contentReference[oaicite:14]{index=14}
+
+        # ─ Prepare video processor ────────────────────────────────
+        self.vae_scale_factor_temporal = (
+            2 ** sum(self.vae.temperal_downsample)
+            if hasattr(self.vae, "temperal_downsample") else 4
+        )
+        self.vae_scale_factor_spatial = (
+            2 ** len(self.vae.temperal_downsample)
+            if hasattr(self.vae, "temperal_downsample") else 8
+        )
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
         self.image_processor = image_processor
+
+    # [All other methods (_get_t5_prompt_embeds, encode_image, encode_prompt,
+    #  check_inputs, prepare_latents, __call__, etc.) remain unchanged.]
+
+
 
     def _get_t5_prompt_embeds(
         self,
@@ -573,20 +577,21 @@ class A2Pipeline(DiffusionPipeline, WanLoraLoaderMixin):
         # 5. Prepare latent variables
         num_channels_latents = self.vae.config.z_dim
         # image = self.video_processor.preprocess(image, height=height, width=width).to(device, dtype=torch.float32)
-        latents, condition = self.prepare_latents(
-            image_vae,
-            batch_size * num_videos_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            num_frames,
-            torch.float32,
-            device,
-            generator,
-            latents,
-            vae_combine,
-            vae_repeat,
-        )
+        with torch.autocast("cuda"):
+            latents, condition = self.prepare_latents(
+                image_vae,
+                batch_size * num_videos_per_prompt,
+                num_channels_latents,
+                height,
+                width,
+                num_frames,
+                torch.float16,
+                device,
+                generator,
+                latents,
+                vae_combine,
+                vae_repeat,
+            )
 
         # 6. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
