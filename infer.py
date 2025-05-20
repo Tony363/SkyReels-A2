@@ -14,11 +14,13 @@ from models.pipeline_a2 import A2Pipeline
 from models.utils import _crop_and_resize_pad, _crop_and_resize, write_mp4
 from huggingface_hub import snapshot_download
 
+# prompt = "A man is holding a teddy bear in the forest." 
 
-prompt = "A man is holding a teddy bear in the forest." 
+prompt = "A man is wearing a black beenie on his head in the forest." 
 negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
 
-refer_images = ['assets/human.png', 'assets/thing.png', 'assets/env.png'] 
+# refer_images = ['assets/human.png', 'assets/thing.png', 'assets/env.png'] 
+refer_images = ['assets/lady_nobackground.jpeg', 'assets/minhat.jpg','assets/env.png']
 width = 832
 height = 480 
 seed = 42 
@@ -32,7 +34,7 @@ else:
 
 # model parameters 
 device = "cuda"
-video_path = "output.mp4"
+video_path = "test_1.mp4"
 pipeline_path = "Skywork/SkyReels-A2"
 dtype = torch.bfloat16
 

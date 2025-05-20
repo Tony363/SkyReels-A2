@@ -1,0 +1,6 @@
+*.safetensors
+*.ckpt
+*.json
+*.model
+*.pyc
+*.mp4
